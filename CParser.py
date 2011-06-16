@@ -62,7 +62,7 @@ class CParser():
             print s
     """
     
-    cacheVersion = 19    ## increment every time cache structure or parsing changes to invalidate old cache files.
+    cacheVersion = 22    ## increment every time cache structure or parsing changes to invalidate old cache files.
     
     def __init__(self, files=None, replace=None, copyFrom=None, processAll=True, cache=None, verbose=False, **args):
         """Create a C parser object fiven a file or list of files. Files are read to memory and operated
@@ -208,7 +208,7 @@ class CParser():
         try:
             ## read cache file
             import pickle
-            cache = pickle.load(open(cacheFile))
+            cache = pickle.load(open(cacheFile, 'rb'))
             
             ## make sure __init__ options match
             if checkValidity:
@@ -218,6 +218,9 @@ class CParser():
                         print cache['opts']
                         print self.initOpts
                     return False
+                elif self.verbose:
+                    print "Cache init opts are OK:"
+                    print cache['opts']
                 if cache['version'] < self.cacheVersion:
                     if self.verbose:
                         print "Cache file is not valid--cache format has changed."
@@ -250,7 +253,7 @@ class CParser():
         #for k in self.dataList:
             #cache[k] = getattr(self, k)
         import pickle
-        pickle.dump(cache, open(cacheFile, 'w'))
+        pickle.dump(cache, open(cacheFile, 'wb'))
 
     def loadFile(self, file, replace=None):
         """Read a file, make replacements if requested. Called by __init__, should
@@ -398,8 +401,8 @@ class CParser():
                 elif d == 'define':
                     if not ifTrue[-1]:
                         continue
-                    #if self.verbose:
-                        #print "  "*(len(ifTrue)) + "define:", macroName, rest
+                    if self.verbose:
+                        print "  "*(len(ifTrue)) + "define:", macroName, rest
                     try:
                         self.ppDefine.parseString(macroName+ ' ' + rest) ## macro is registered here
                     except:
@@ -762,11 +765,22 @@ class CParser():
         
         self.variableDecl.setParseAction(self.processVariable)
         
+        ## function definition
+        #self.paramDecl = Group(self.typeSpec + (self.declarator | self.abstractDeclarator)) + Optional(Literal('=').suppress() + expression('value'))
+        self.typelessFunctionDecl = self.declarator('decl') + nestedExpr('{', '}').suppress()
+        self.functionDecl = self.typeSpec('type') + self.declarator('decl') + nestedExpr('{', '}').suppress()
+        self.functionDecl.setParseAction(self.processFunction)
+        
+        
         ## Struct definition
         self.structDecl = Forward()
         structKW = (Keyword('struct') | Keyword('union'))
         #self.structType << structKW('structType') + ((Optional(ident)('name') + lbrace + Group(ZeroOrMore( Group(self.structDecl | self.variableDecl.copy().setParseAction(lambda: None)) ))('members') + rbrace) | ident('name'))
-        self.structMember = Group(self.variableDecl.copy().setParseAction(lambda: None))
+        self.structMember = (
+            Group(self.variableDecl.copy().setParseAction(lambda: None)) |
+            (self.typeSpec + self.declarator + nestedExpr('{', '}')).suppress() |
+            (self.declarator + nestedExpr('{', '}')).suppress()
+        )
         self.declList = lbrace + Group(OneOrMore(self.structMember))('members') + rbrace
         self.structType << (Keyword('struct') | Keyword('union'))('structType') + ((Optional(ident)('name') + self.declList) | ident('name'))
         
@@ -776,17 +790,13 @@ class CParser():
         self.structDecl = self.structType + semi
 
         ## enum definition
-        enumVarDecl = Group(ident('name')  + Optional(Literal('=').suppress() + integer('value')))
+        enumVarDecl = Group(ident('name')  + Optional(Literal('=').suppress() + (integer('value') | ident('valueName'))))
         
         self.enumType << Keyword('enum') + (Optional(ident)('name') + lbrace + Group(delimitedList(enumVarDecl))('members') + rbrace | ident('name'))
         self.enumType.setParseAction(self.processEnum)
         
         self.enumDecl = self.enumType + semi
 
-        ## function definition
-        #self.paramDecl = Group(self.typeSpec + (self.declarator | self.abstractDeclarator)) + Optional(Literal('=').suppress() + expression('value'))
-        self.functionDecl = self.typeSpec('type') + self.declarator('decl') + nestedExpr('{', '}').suppress()
-        self.functionDecl.setParseAction(self.processFunction)
         
         #self.parser = (self.typeDecl | self.variableDecl | self.structDecl | self.enumDecl | self.functionDecl)
         self.parser = (self.typeDecl | self.variableDecl | self.functionDecl)
@@ -803,6 +813,15 @@ class CParser():
         if 'ptrs' in decl and len(decl['ptrs']) > 0:
             toks.append('*' * len(decl['ptrs']))
         if 'arrays' in decl and len(decl['arrays']) > 0:
+            #arrays  = []
+            #for x in decl['arrays']:
+                #n = self.evalExpr(x)
+                #if n == -1:           ## If an array was given as '[]', interpret it as '*' instead.
+                    #toks.append('*')
+                #else:
+                    #arrays.append(n)
+            #if len(arrays) > 0:
+                #toks.append(arrays)
             toks.append([self.evalExpr(x) for x in decl['arrays']])
         if 'args' in decl and len(decl['args']) > 0:
             #print "  process args"
@@ -832,9 +851,11 @@ class CParser():
              '__X'  - calling convention (windows only). X can be 'cdecl' or 'stdcall' 
              list   - array. Value(s) indicate the length of each array, -1 for incomplete type.
              tuple  - function, items are the output of processType for each function argument.
-        int *x[10]            =>  ('x', ['int', [10], '*'])
-        char fn(int x)         =>  ('fn', ['char', [('x', ['int'])]])
-        struct s (*)(int, int*)   =>  (None, ["struct s", ((None, ['int']), (None, ['int', '*'])), '*'])
+             
+        Examples:
+            int *x[10]            =>  ('x', ['int', [10], '*'])
+            char fn(int x)         =>  ('fn', ['char', [('x', ['int'])]])
+            struct s (*)(int, int*)   =>  (None, ["struct s", ((None, ['int']), (None, ['int', '*'])), '*'])
         """
         #print "PROCESS TYPE/DECL:", typ, decl
         (name, decl) = self.processDeclarator(decl)
@@ -865,6 +886,8 @@ class CParser():
                 for v in t.members:
                     if v.value != '':
                         i = eval(v.value)
+                    if v.valueName != '':
+                        i = enum[v.valueName]
                     enum[v.name] = i
                     self.addDef('values', v.name, i)
                     i += 1
@@ -932,7 +955,7 @@ class CParser():
                     sname = t.name[0]
             if self.verbose:
                 print "  NAME:", sname
-            if sname not in self.defs[strTyp+'s'] or self.defs[strTyp+'s'][sname] == {}:
+            if len(t.members) > 0 or sname not in self.defs[strTyp+'s'] or self.defs[strTyp+'s'][sname] == {}:
                 if self.verbose:
                     print "  NEW " + strTyp.upper()
                 struct = []
@@ -1071,6 +1094,10 @@ class CParser():
         used = []
         while True:
             if self.isFundType(typ):
+                ## remove 'signed' before returning evaluated type
+                typ[0] = re.sub(r'\bsigned\b', '', typ[0]).strip()
+                
+                
                 return typ
             parent = typ[0]
             if parent in used:
@@ -1089,10 +1116,16 @@ class CParser():
             for t in fd:
                 typ = fd[t]
                 for k in typ:
-                    if k == name:
-                        res.append((f, t))
+                    if isinstance(name, basestring):
+                        if k == name:
+                            res.append((f, t))
+                    else:
+                        if re.match(name, k):
+                            res.append((f, t, k))
         return res
 
+    
+    
     def findText(self, text):
         """Search all file strings for text, return matching lines."""
         res = []
@@ -1118,7 +1151,7 @@ if hasPyParsing:
     ## Some basic definitions
     expression = Forward()
     pexpr = '(' + expression + ')'
-    numTypes = ['int', 'float', 'double']
+    numTypes = ['int', 'float', 'double', '__int64']
     baseTypes = ['char', 'bool', 'void'] + numTypes
     sizeModifiers = ['short', 'long']
     signModifiers = ['signed', 'unsigned']
